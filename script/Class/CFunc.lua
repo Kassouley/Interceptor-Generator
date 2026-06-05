@@ -6,16 +6,16 @@ CFunc.__index = CFunc
 function CFunc:new(attribute)
     local self = setmetatable({}, CFunc)
 
-    self.gen    = attribute[1]
-    self.capture_point = attribute[2]
-    self.ftype  = CVar:new(attribute[3] .. " retval")
-    self.fname  = attribute[4]
+    self.gen    = attribute[1]:trim()
+    self.capture_point = attribute[2]:trim()
+    self.ftype  = CVar:new(attribute[3], "retval")
+    self.fname  = attribute[4]:trim()
     
     self.fparam = {}
     if attribute[5] ~= "void" and attribute[5] ~= nil then
         -- Extract params
-        for i = 5, #attribute do
-            local fparam = CVar:new(attribute[i])
+        for i = 5, #attribute, 2 do
+            local fparam = CVar:new(attribute[i], attribute[i+1])
             table.insert(self.fparam, fparam)
         end
     end
@@ -27,13 +27,14 @@ function CFunc:has_param()
 end
 
 function CFunc:return_is_ptr()
-    return self.ftype:is_ptr()
+    local param = self.ftype
+    return param:is_ptr() and not param:is_generic_ptr() and not param:is_opaque(true)
 end
 
 
 function CFunc:params_has_ptr()
     for _, param in ipairs(self.fparam) do
-        if param:is_ptr() then
+        if param:is_ptr() and not param:is_generic_ptr() and not param:is_opaque(true) then
             return true
         end
     end
@@ -47,7 +48,7 @@ end
 
 
 function CFunc:is_void()
-    return self.ftype:is_void()
+    return self.ftype:is_void(true)
 end
 
 
@@ -76,16 +77,17 @@ end
 
 
 function CFunc:capture_point_is_post_call()
-    return self:has_param() and self.capture_point == "ARGS_AFTER"
+    return self:has_param() and self.capture_point == "ARG_AFTER"
 end
 
 
 function CFunc:capture_point_is_pre_call()
-    return self:has_param() and self.capture_point == "ARGS_BEFORE"
+    return self:has_param() and self.capture_point == "ARG_BEFORE"
 end
 
 
 function CFunc:get_fargs_string(more_args)
+    more_args = more_args or {}
     local strings = {}
     for _, param in ipairs(self.fparam) do
         table.insert(strings, param.name)
@@ -98,6 +100,7 @@ end
 
 
 function CFunc:get_fparams_string(more_params)
+    more_params = more_params or {}
     local strings = {}
     for _, param in ipairs(self.fparam) do
         table.insert(strings, param.pdecl)
@@ -107,3 +110,5 @@ function CFunc:get_fparams_string(more_params)
     end
     return table.concat(strings, ", ")
 end
+
+return CFunc

@@ -68,11 +68,20 @@ def write_structs_unions_csv(structs_unions, output_file):
                 row.append(field[1])
             writer.writerow(row)
 
+def check_arg_position(name: str) -> str:
+    keywords = ['free', 'cleanup', 'fini', 'release', 'destroy', 'deinit', 'unload']
+    name_lower = name.lower()
+
+    for kw in keywords:
+        if kw in name_lower:
+            return "ARG_BEFORE"
+    return "ARG_AFTER"
+
 def write_functions_csv(functions, output_file):
     with open(output_file, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile, delimiter=";")
         for function in functions:
-            row = ["AUTOGEN", "ARG_AFTER", function[0], function[1]]  # return type and function name
+            row = ["AUTOGEN", check_arg_position(function[1]), function[0], function[1]]  # return type and function name
             for param in function[2]:
                 row.append(param[0])  # parameter type
                 row.append(param[1])  # parameter name

@@ -137,7 +137,7 @@ end
 function StringManager:FOR_EACH_DOMAIN_FUNCTION(code)
     local content_table = {}
     local func = assert(loadstring("return "..code)())
-    
+
     for _, f in ipairs(self.current_domain.function_data) do
         local content = func(f)
         table.insert(content_table, content)

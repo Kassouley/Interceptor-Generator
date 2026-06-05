@@ -9,8 +9,10 @@ CVar.__data = {}
 
 
 CVar.__data.c_types_fmt = {
-    ["N/A"]                     = nil,
-    ["void"]                    = nil,
+    ["N/A"]                     = true,
+    ["void"]                    = true,
+    ["struct"]                  = true,
+    ["union"]                   = true,
     ["opaque"]                  = "%p",
     ["function"]                = "%p",
     ["string"]                  = "%s",
@@ -46,54 +48,66 @@ CVar.__data.c_types_fmt = {
 
 CVar.__data.type_qualifers  = { ["const"] = true, ["volatile"] = true, ["restrict"] = true }
 
---- Sets the CVar shared data for typedefs, structs, and keywords.
--- @param data A table containing typedef and struct CSV mappings.
-function CVar:set_data(data)
-    CVar.__data.typedef_map = data.typedef_csv
-    CVar.__data.struct_map = data.struct_csv
+function CVar.set_data(data)
+    CVar.__data.typedef_map = data.typedef_csv or {}
+    CVar.__data.struct_map = data.struct_csv or {}
 end
 
-function CVar:is_function(ctype)
-    ctype = ctype or self.ctype
-    ctype = self:remove_type_qualifers()
-    return ctype:find("%(%*[^)]*%)%(") ~= nil
-end
-
-
-function CVar:is_struct(ctype, check_pointed_value)
-    ctype = ctype or self.ctype
-    ctype = self:remove_type_qualifers()
-
-    if not check_pointed_value and self:is_ptr(ctype) then
-        return false
+local function __resolve_typedef(type_str, depth)
+    depth = depth or 0
+    if depth > 10 then
+        return type_str -- prevent infinite recursion
     end
 
-    return ctype:find("struct%s+") ~= nil
-end
+    type_str = type_str:trim()
 
-
-function CVar:is_enum(ctype, check_pointed_value)
-    ctype = ctype or self.ctype
-    ctype = self:remove_type_qualifers()
-    
-    if not check_pointed_value and self:is_ptr(ctype) then
-        return false
+    -- Prevent full type resolution if already qualified
+    if CVar.__data.typedef_map[type_str] and not type_str:match("^(struct|union|enum)%s+") then
+        return __resolve_typedef(CVar.__data.typedef_map[type_str], depth + 1)
     end
 
-    return ctype:find("enum%s+") ~= nil
-end
-
-
-function CVar:is_union(ctype, check_pointed_value)
-    ctype = ctype or self.ctype
-    ctype = self:remove_type_qualifers()
-    
-    if not check_pointed_value and self:is_ptr(ctype) then
-        return false
+    -- Handle pointer to typedef function: e.g., "Func_t*" where Func_t = "void (int)"
+    local base, stars = type_str:match("^([%a_][%w_]*)%s*(%**)$")
+    if base and CVar.__data.typedef_map[base] then
+        local resolved_base = __resolve_typedef(CVar.__data.typedef_map[base], depth + 1)
+        if resolved_base:match("^%w+%s*%b()%s*$") then
+            -- It's a function type like "void (int)", and we are doing "Func_t*"
+            if stars and #stars > 0 then
+                resolved_base = resolved_base:gsub("%b()", function(params)
+                    return "(*" .. string.rep("*", #stars - 1) .. ")" .. params
+                end)
+            end
+            return resolved_base
+        else
+            -- Normal typedef (not function type), resolve normally
+            return resolved_base .. stars
+        end
     end
 
-    return ctype:find("union%s+") ~= nil
+    -- Replace individual typedef words if not prefixed by struct/union/enum
+    local resolved = type_str:gsub("([%a_][%w_]*)", function(word)
+        -- Check for full tag+identifier pattern like "struct MyType", "union Foo"
+        local tag_keywords = { "struct", "union", "enum" }
+        for _, tag in ipairs(tag_keywords) do
+            if type_str:match(tag .. "%s+" .. word) then
+                return word -- already tagged, skip replacing
+            end
+        end
+        -- Replace if it's a known typedef
+        if CVar.__data.typedef_map[word] then
+            return __resolve_typedef(CVar.__data.typedef_map[word], depth + 1)
+        end
+
+        return word
+    end)
+    return resolved
 end
+
+
+function CVar:is_function()
+    return self.ctype:find("%(%*[^)]*%)%(") ~= nil
+end
+
 
 function CVar:is_ptr(ctype)
     ctype = ctype or self.ctype
@@ -101,73 +115,113 @@ function CVar:is_ptr(ctype)
     return cnt > 0
 end
 
-function CVar:is_string(ctype, check_pointed_value)
-    ctype = ctype or self.ctype
-    ctype = self:remove_type_qualifers()
-    local cnt, pointed_type = self:get_ptr_count(ctype)
-    
-    if not check_pointed_value and cnt > 1 then
-        return pointed_type:match("char") ~= nil
-    end
 
-    return pointed_type:match("char") ~= nil and cnt == 1
-end
+function CVar:is_static_array(exclude_ptr)
+    -- Exclude function pointer types
+    if self:is_function() then return false end
 
-function CVar:is_generic_ptr(ctype)
-    ctype = ctype or self.ctype
-    ctype = self:remove_type_qualifers()
-    local cnt, pointed_type = self:get_ptr_count(ctype)
-    return pointed_type:match("void") ~= nil and cnt == 1
-end
-
-
-function CVar:is_static_array(ctype, check_pointed_value)
-    ctype = ctype or self.ctype
-    ctype = self:remove_type_qualifers()
-    
-    if not check_pointed_value and self:is_ptr(ctype) then
+    if exclude_ptr and self:is_ptr() then
         return false
     end
 
-    return not self:is_ptr(ctype) and ctype:find("%[%d-%]") ~= nil
+    return self.ctype:find("%[%d+%]") ~= nil
 end
 
 
-function CVar:is_dynamic_array(ctype)
-    ctype = ctype or self.ctype
-    ctype = self:remove_type_qualifers()
-    return ctype:find("%[%%s*%]") ~= nil
+function CVar:is_dynamic_array()
+    -- Exclude function pointer types
+    if self:is_function() then return false end
+
+    return self.ctype:find("%[%%s*%]") ~= nil
 end
 
 
-function CVar:is_array(ctype)
-    ctype = ctype or self.ctype
-    return self:is_dynamic_array(ctype) or self:is_static_array(ctype)
+function CVar:is_array()
+    return self:is_dynamic_array() or self:is_static_array()
 end
 
 
-function CVar:is_opaque(ctype, check_pointed_value)
-    ctype = self.ctype or ctype
-    
-    if not check_pointed_value and self:is_ptr(ctype) then
+function CVar:is_struct(exclude_ptr)
+    -- Exclude function pointer types to not match struct in function parameters
+    if self:is_function() then return false end
+
+    if exclude_ptr and self:is_ptr() then
         return false
     end
 
-    if self:is_struct(ctype) or self:is_union(ctype) then
-        return #self.struct_fields == 0
+    return self.ctype:find("struct%s+") ~= nil
+end
+
+
+function CVar:is_enum(exclude_ptr)
+    -- Exclude function pointer types to not match enum in function parameters
+    if self:is_function() then return false end
+
+    if exclude_ptr and self:is_ptr() then
+        return false
+    end
+
+    return self.ctype:find("enum%s+") ~= nil
+end
+
+
+function CVar:is_union(exclude_ptr)
+    -- Exclude function pointer types to not match union in function parameters
+    if self:is_function() then return false end
+
+    if exclude_ptr and self:is_ptr() then
+        return false
+    end
+
+    return self.ctype:find("union%s+") ~= nil
+end
+
+
+function CVar:is_opaque(exclude_ptr)
+    local cnt, _ = self:get_ptr_count()
+    if exclude_ptr and cnt > 1 then
+        return false
+    end
+
+    if self:is_struct() or self:is_union() then
+        return #self.struct_fields == 0 and cnt >= 1
     end
     return false
 end
 
-function CVar:is_void(ctype, check_pointed_value)
-    ctype = ctype or self.ctype
-    ctype = self:remove_type_qualifers()
 
-    if not check_pointed_value and self:is_ptr(ctype) then
+function CVar:is_string(exclude_ptr)
+    -- Exclude function pointer types
+    if self:is_function() then return false end
+
+    local cnt, pointed_type = self:get_ptr_count()
+
+    if exclude_ptr and cnt > 1 then
         return false
     end
 
-    return ctype:find("void") ~= nil
+    return pointed_type:match("char") ~= nil and cnt >= 1
+end
+
+
+function CVar:is_generic_ptr()
+    -- Exclude function pointer types
+    if self:is_function() then return false end
+
+    local cnt, pointed_type = self:get_ptr_count()
+    return pointed_type:match("void") ~= nil and cnt == 1
+end
+
+
+function CVar:is_void(exclude_ptr)
+    -- Exclude function pointer types
+    if self:is_function() then return false end
+
+    if exclude_ptr and self:is_ptr() then
+        return false
+    end
+
+    return self.ctype:find("void") ~= nil
 end
 
 function CVar:is_unknown()
@@ -179,17 +233,17 @@ end
 function CVar:get_base_type()
     local ctype = self.ctype
 
-    if self:is_string(ctype, true) then
+    if self:is_string() then
         return "string"
-    elseif self:is_function(ctype) then
+    elseif self:is_function() then
         return "function"
-    elseif self:is_enum(ctype, true) then
+    elseif self:is_enum() then
         return "enum"
-    elseif self:is_opaque(ctype, true) then
+    elseif self:is_opaque() then
         return "opaque"
-    elseif self:is_struct(ctype, true) then
+    elseif self:is_struct() then
         return "struct"
-    elseif self:is_union(ctype, true) then
+    elseif self:is_union() then
         return "union"
     end
 
@@ -198,9 +252,9 @@ function CVar:get_base_type()
 
     -- Remove pointers and arrays
     ctype = ctype:gsub("%*+", "")             -- remove pointer stars
-    ctype = ctype:gsub("%[[^%]]*%]", "")      -- remove array brackets
+    ctype = ctype:gsub("%[[^%]]*%]", "")     -- remove array brackets
 
-    return ctype
+    return ctype:trim()
 end
 
 
@@ -219,12 +273,13 @@ function CVar:get_decl(type_str, var_name)
     type_str = type_str or self.vtype
     var_name = var_name or self.name
 
-    if self:is_function(type_str) or type_str:find("%(%*%)") ~= nil then
-      local start_pos, end_pos = type_str:find("%(%*[^)]*%)")
+    local start_pos, end_pos = type_str:find("%(%*[^)]*%)")
+    if start_pos and end_pos then
       return type_str:sub(1, end_pos - 1) .. " " .. var_name .. type_str:sub(end_pos)
     end
-    if self:is_array(type_str) then
-        local pos_array = type_str:find("%[.-%]")
+    
+    local pos_array = type_str:find("%[.-%]")
+    if pos_array then
         local base_type = type_str:sub(1, pos_array - 1)
         local array_size = type_str:sub(pos_array)
         return base_type .. " " .. var_name .. array_size
@@ -233,9 +288,21 @@ function CVar:get_decl(type_str, var_name)
 end
 
 
+local function extract_tagged_name(ctype)
+    if ctype:find("unnamed") then
+        return ctype
+    end
+    local name = ctype:match("%s*struct%s+([%w_]+)")
+            or ctype:match("%s*union%s+([%w_]+)")
+            or ctype:match("%s*enum%s+([%w_]+)")
+    return name
+end
+
+
 function CVar:__resolve_struct()
-    local base_type = self:get_base_type()
-    local struct_map = CVar.__data.struct_map[base_type]
+    local ctype = self.ctype
+    local struct_map = CVar.__data.struct_map[extract_tagged_name(ctype)]
+    
     if struct_map then
         for i = 1, #struct_map do
             local pair = struct_map[i]
@@ -248,51 +315,20 @@ end
 
 function CVar:new(vtype, name)
     local att = setmetatable({}, CVar)
-    att.pdecl = att:get_decl()
-    att.vtype = vtype
-    att.name  = name
+    att.vtype = vtype:trim()
+    att.name  = name:trim()
 
-    att.ctype = att:__resolve_typedef(vtype)
+    att.ctype = __resolve_typedef(vtype)
+    att.pdecl = att:get_decl()
 
     att.struct_fields = {}
-    if self:is_struct() or self:is_union() then
-        self:__resolve_struct()
+    if att:is_struct() or att:is_union() then
+        att:__resolve_struct()
     end
-    
+
     return att
 end
 
-
-function CVar:__resolve_typedef(type_str, depth)
-    depth = depth or 0
-    if depth > 10 then
-        return type_str -- prevent infinite recursion
-    end
-
-    type_str = type_str:trim()
-
-    -- If the whole type_str is a typedef, resolve it directly
-    if CVar.__data.typedef_map[type_str] then
-        return self:__resolve_typedef(CVar.__data.typedef_map[type_str], depth + 1)
-    end
-
-    -- Otherwise, try to replace typedefs inside the string
-    -- We replace words that match typedef names with their resolved type
-
-    -- Pattern to find words (identifiers)
-    local function replace_typedefs(word)
-        if CVar.__data.typedef_map[word] then
-            return self:__resolve_typedef(CVar.__data.typedef_map[word], depth + 1)
-        else
-            return word
-        end
-    end
-
-    -- Replace all typedef words recursively
-    local resolved = type_str:gsub("(%w+)", replace_typedefs)
-
-    return resolved
-end
 
 
 function CVar:__get_type_qualifers(ctype)
@@ -327,17 +363,23 @@ function CVar:get_type_qualifers(ctype)
     end
 end
 
-function CVar:get_type_for_struct(ctype)
-    ctype = ctype or self.ctype
-    ctype = CVar:remove_type_qualifers(ctype)
+function CVar:get_type_for_struct(type_str)
+    type_str = type_str or self.vtype
 
-    if self:is_dynamic_array(ctype) then
-        ctype = ctype:gsub("%[%]", "(*)")
+    local ctype_ptr_count, _ = self:get_ptr_count()
+    local vtype_ptr_count, _ = self:get_ptr_count(type_str)
+
+    if not self:is_opaque() and ctype_ptr_count > vtype_ptr_count then
+        type_str = self.ctype
     end
 
-    return ctype
-end
+    type_str = CVar:remove_type_qualifers(type_str)
 
+    type_str = type_str:gsub("%[%]", "(*)")
+
+
+    return type_str
+end
 
 
 function CVar:remove_type_qualifers(decl)
@@ -376,10 +418,14 @@ end
 function CVar:get_ptr_count(ctype)
     ctype = ctype or self.ctype
 
-    if self:is_function(ctype) then
+    if self:is_function() then
         return 0, ctype
     end
     local ref_cnt = 0
+    ctype = ctype:gsub("%s*%(%s*%*%s*%)%s*", function()
+        ref_cnt = ref_cnt + 1
+        return ""
+    end)
     ctype = ctype:gsub("%s*%*%s*", function()
         ref_cnt = ref_cnt + 1
         return ""

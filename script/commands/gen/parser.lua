@@ -6,9 +6,9 @@ local CVar  = require("CVar")
 local parser = {}
 
 local function parse_function_csv(filename, data)
-    CVar:set_data(data)
     local fcnts = {}
     local filename = lfs.get_cleaned_path(filename)
+    CVar.set_data(data)  -- Set the data for CVar to use
     -- Read the CSV file
     for line in io.lines(filename) do
         local cells = line:split(";")
